@@ -1,0 +1,43 @@
+
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Local Web IDE</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      :root {
+        --bg: #0f1720;
+        --panel: #0b1220;
+        --surface: #0f1624;
+        --muted: #9aa4b2;
+        --text: #dbe7ff;
+        --accent: #7c5cff;
+        --error: #ff6b6b;
+        --success: #7be495;
+        --editor-bg: #0b1220;
+        --editor-gutter: #071023;
+        --shadow: rgba(2,6,23,0.6);
+        --radius: 8px;
+        --font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, "Roboto Mono", monospace;
+      }
+      body {
+          font-family: var(--font-family);
+      }
+    </style>
+  <script type="importmap">
+{
+  "imports": {
+    "react": "https://aistudiocdn.com/react@^19.2.0",
+    "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.0/",
+    "react/": "https://aistudiocdn.com/react@^19.2.0/"
+  }
+}
+</script>
+</head>
+  <body class="bg-[#0f1720] text-[#dbe7ff]">
+    <div id="root"></div>
+    <script type="module" src="/index.tsx"></script>
+  </body>
+</html>

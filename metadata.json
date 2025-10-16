@@ -1,0 +1,5 @@
+{
+  "name": "Local Web IDE",
+  "description": "A simple, browser-based IDE for HTML, CSS, and JavaScript projects. It allows you to create, edit, and preview web projects locally, with features like multi-file editing, live preview, and a built-in console. Projects can be saved in your browser and exported/imported as JSON files.",
+  "requestFramePermissions": []
+}
