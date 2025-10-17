@@ -1,0 +1,21 @@
+{
+  "short_name": "Web IDE",
+  "name": "Local Web IDE",
+  "description": "A simple, browser-based IDE for HTML, CSS, and JavaScript projects.",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "type": "image/png",
+      "sizes": "192x192"
+    },
+    {
+      "src": "icon-512.png",
+      "type": "image/png",
+      "sizes": "512x512"
+    }
+  ],
+  "start_url": ".",
+  "display": "standalone",
+  "theme_color": "#0f1720",
+  "background_color": "#0f1720"
+}

@@ -1,30 +1,54 @@
-
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Local Web IDE</title>
+    <title>SAT18 Local Web IDE</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,700;1,400&display=swap" rel="stylesheet">
+    <link rel="manifest" href="/manifest.json" />
+    <meta name="theme-color" content="#0d1117" />
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
       :root {
-        --bg: #0f1720;
-        --panel: #0b1220;
-        --surface: #0f1624;
-        --muted: #9aa4b2;
-        --text: #dbe7ff;
-        --accent: #7c5cff;
-        --error: #ff6b6b;
-        --success: #7be495;
-        --editor-bg: #0b1220;
-        --editor-gutter: #071023;
-        --shadow: rgba(2,6,23,0.6);
-        --radius: 8px;
-        --font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, "Roboto Mono", monospace;
+        --bg: #0d1117;
+        --panel: #161b22;
+        --surface: #21262d;
+        --muted: #8b949e;
+        --text: #e6edf3;
+        --accent: #00c2ff;
+        --error: #f85149;
+        --success: #2ea043;
+        --editor-bg: #0d1117;
+        --editor-gutter: #010409;
+        --shadow: rgba(0,0,0,0.4);
+        --radius: 6px;
+        --font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, "Roboto Mono", monospace;
+      }
+      [data-theme="light"] {
+        --bg: #ffffff;
+        --panel: #f6f8fa;
+        --surface: #eaeef2;
+        --muted: #57606a;
+        --text: #1f2328;
+        --accent: #0969da;
+        --error: #cf222e;
+        --success: #1a7f37;
+        --editor-bg: #ffffff;
+        --editor-gutter: #f6f8fa;
+        --shadow: rgba(140, 149, 159, 0.2);
       }
       body {
           font-family: var(--font-family);
+          background-color: var(--bg);
+          color: var(--text);
+          transition: background-color 0.3s, color 0.3s;
       }
+      ::-webkit-scrollbar { width: 8px; height: 8px; }
+      ::-webkit-scrollbar-track { background: var(--editor-gutter); }
+      ::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+      ::-webkit-scrollbar-thumb:hover { background: #475569; }
     </style>
   <script type="importmap">
 {
@@ -36,8 +60,19 @@
 }
 </script>
 </head>
-  <body class="bg-[#0f1720] text-[#dbe7ff]">
+  <body>
     <div id="root"></div>
     <script type="module" src="/index.tsx"></script>
+    <script>
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+          navigator.serviceWorker.register('/sw.js').then(registration => {
+            console.log('SW registered: ', registration);
+          }).catch(registrationError => {
+            console.log('SW registration failed: ', registrationError);
+          });
+        });
+      }
+    </script>
   </body>
 </html>
