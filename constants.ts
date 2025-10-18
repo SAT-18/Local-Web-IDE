@@ -1,62 +1,73 @@
-import type { ProjectFile, Settings } from './types';
+import type { Project, Settings } from './types';
 
-export const DEFAULT_HTML = `<h1>Hello, SAT18!</h1>
-<p>This is your monorepo-ready local web IDE.</p>
-<button id="greet-btn">Click me</button>
-`;
+const now = () => new Date().toISOString();
+const id = (s = '') => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}${s}`;
 
-export const DEFAULT_CSS = `body {
-  font-family: 'JetBrains Mono', sans-serif;
-  background-color: #0d1117;
-  color: #e6edf3;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  height: 100vh;
-  margin: 0;
-  flex-direction: column;
-  text-align: center;
-}
+export const SAMPLE_PROJECT: Project = {
+  id: id('proj'),
+  name: 'my-first-project',
+  createdAt: now(),
+  updatedAt: now(),
+  rootId: 'root',
+  nodes: {
+    'root': {
+      id: 'root',
+      name: 'My Project',
+      type: 'folder',
+      parentId: null,
+      childrenIds: ['index.html', 'src', 'style.css'],
+      createdAt: now(),
+      updatedAt: now(),
+    },
+    'index.html': {
+      id: 'index.html',
+      name: 'index.html',
+      type: 'file',
+      parentId: 'root',
+      content: `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8"/>
+    <title>My First App</title>
+  </head>
+  <body>
+    <div id="app">Hello world</div>
+  </body>
+</html>`,
+      createdAt: now(),
+      updatedAt: now(),
+    },
+    'style.css': {
+      id: 'style.css',
+      name: 'style.css',
+      type: 'file',
+      parentId: 'root',
+      content: `body{font-family:system-ui, -apple-system, "Segoe UI"; background:#0d1117;color:#e6edf3;padding:24px}`,
+      createdAt: now(),
+      updatedAt: now(),
+    },
+    'src': {
+      id: 'src',
+      name: 'src',
+      type: 'folder',
+      parentId: 'root',
+      childrenIds: ['app.js'],
+      createdAt: now(),
+      updatedAt: now(),
+    },
+    'app.js': {
+      id: 'app.js',
+      name: 'app.js',
+      type: 'file',
+      parentId: 'src',
+      content: `console.log('app.js running');
+document.getElementById('app')?.append(' — powered by SAT18 Local IDE');`,
+      createdAt: now(),
+      updatedAt: now(),
+    },
+  },
+};
 
-button {
-  margin-top: 1rem;
-  padding: 10px 20px;
-  font-size: 16px;
-  cursor: pointer;
-  background-color: var(--accent);
-  color: #0d1117;
-  font-weight: bold;
-  border: none;
-  border-radius: 5px;
-  transition: transform 0.2s, background-color 0.3s;
-}
-
-button:hover {
-    background-color: #38d9ff;
-    transform: scale(1.05);
-}
-`;
-
-export const DEFAULT_JS = `console.log("Welcome to your Monorepo-ready IDE!");
-
-function greet() {
-  const name = prompt("What's your name?");
-  if (name) {
-    alert("Hello, " + name + "!");
-    console.log("Greeted: " + name);
-  } else {
-    console.warn("User cancelled the prompt.");
-  }
-}
-
-document.getElementById('greet-btn')?.addEventListener('click', greet);
-`;
-
-export const DEFAULT_FILES: ProjectFile[] = [
-  { id: 'html-default', path: 'public/index.html', content: DEFAULT_HTML },
-  { id: 'css-default', path: 'src/styles/main.css', content: DEFAULT_CSS },
-  { id: 'js-default', path: 'src/app.js', content: DEFAULT_JS },
-];
 
 export const DEFAULT_SETTINGS: Settings = {
   fontSize: 14,

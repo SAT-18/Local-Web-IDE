@@ -1,592 +1,421 @@
-import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import type { ProjectFile, Settings, LogEntry, LogType } from './types';
-import { DEFAULT_FILES, DEFAULT_SETTINGS } from './constants';
+import React, { useState, useEffect, useCallback, useMemo, createContext } from 'react';
+import type { Project, Settings, FileNode, FolderNode, Node, LogEntry } from './types';
+import { SAMPLE_PROJECT, DEFAULT_SETTINGS } from './constants';
+import * as storage from './core/storage';
 import { useDebounce } from './hooks/useDebounce';
-import * as db from './services/db';
-import { FileIcon, SaveIcon, ExportIcon, ImportIcon, SettingsIcon, ChevronDownIcon, TrashIcon, XIcon, RefreshCwIcon, MenuIcon, PlusIcon, FolderIcon, FolderOpenIcon } from './components/icons';
 
-// --- TYPES & HELPERS ---
+import { Topbar, StatusBar, SettingsModal, ProjectSelectorModal } from './components/Layout';
+import { FileExplorer } from './components/FileExplorer';
+import { EditorPanel, PreviewPanel, Console } from './components/Panels';
 
-type FSTreeNode = {
-  name: string;
-  path: string;
-  children?: FSTreeNode[];
-  file?: ProjectFile;
+export const AppContext = createContext<{ project: Project | null }>({ project: null });
+
+const id = (s = '') => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}${s}`;
+const now = () => new Date().toISOString();
+
+const findNodePath = (project: Project, nodeId: string): string => {
+    let path = '';
+    let currentNode = project.nodes[nodeId];
+    if (!currentNode) return '/';
+    while (currentNode) {
+        path = `/${currentNode.name}${path}`;
+        if (currentNode.parentId === null) break;
+        currentNode = project.nodes[currentNode.parentId];
+    }
+    return path.replace('//', '/') || '/';
 };
 
-function buildFileTree(files: ProjectFile[]): FSTreeNode[] {
-    const root: { [key: string]: FSTreeNode } = {};
+const getNodeRelativePath = (project: Project, nodeId: string): string => {
+    const parts: string[] = [];
+    let currentNode = project.nodes[nodeId];
+    // Traverse up until we hit the root folder
+    while (currentNode && currentNode.parentId && currentNode.parentId !== project.rootId) {
+        parts.unshift(currentNode.name);
+        currentNode = project.nodes[currentNode.parentId];
+    }
+    // Add the final part if it's not the root itself
+    if (currentNode && currentNode.id !== project.rootId) {
+        parts.unshift(currentNode.name);
+    }
+    return parts.join('/');
+};
 
-    files.forEach(file => {
-        const parts = file.path.split('/');
-        let currentLevel = root;
-        let currentPath = '';
 
-        parts.forEach((part, index) => {
-            currentPath = currentPath ? `${currentPath}/${part}` : part;
-            const isFile = index === parts.length - 1;
+const getProjectSize = (project: Project) => {
+    const size = Object.values(project.nodes).reduce((acc, node: Node) => {
+        if (node.type === 'file') {
+            const content = (node as FileNode).content || ''; // Defensive check
+            return acc + new TextEncoder().encode(content).length;
+        }
+        return acc;
+    }, 0);
+    if (size < 1024) return `${size} B`;
+    if (size < 1024 * 1024) return `${(size / 1024).toFixed(2)} KB`;
+    return `${(size / (1024 * 1024)).toFixed(2)} MB`;
+};
 
-            if (!currentLevel[part]) {
-                currentLevel[part] = {
-                    name: part,
-                    path: currentPath,
-                    children: isFile ? undefined : [],
-                    file: isFile ? file : undefined,
-                };
+const App: React.FC = () => {
+    const [project, setProject] = useState<Project | null>(null);
+    const [projects, setProjects] = useState<Project[]>([]);
+    const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
+    const [activeFileId, setActiveFileId] = useState<string | null>(null);
+    const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'unsaved'>('saved');
+    const [isExplorerVisible, setIsExplorerVisible] = useState(true);
+    const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
+    const [isProjectSelectorOpen, setIsProjectSelectorOpen] = useState(false);
+    const [logs, setLogs] = useState<LogEntry[]>([]);
+    const [isConsoleOpen, setIsConsoleOpen] = useState(true);
+    const [previewKey, setPreviewKey] = useState(Date.now());
+
+    const debouncedProject = useDebounce(project, settings.autosaveInterval > 0 ? settings.autosaveInterval * 1000 : 2000);
+
+    // Initialization
+    useEffect(() => {
+        const init = async () => {
+            const loadedSettings = await storage.loadSettings();
+            setSettings(loadedSettings || DEFAULT_SETTINGS);
+
+            const allProjects = await storage.getAllProjects();
+            setProjects(allProjects);
+
+            const lastProjectId = localStorage.getItem('last_project_id');
+            let projectToLoad = lastProjectId ? await storage.loadProjectById(lastProjectId) : null;
+            
+            if (!projectToLoad && allProjects.length > 0) {
+                projectToLoad = allProjects.sort((a,b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())[0];
+            } else if (!projectToLoad && allProjects.length === 0) {
+                projectToLoad = SAMPLE_PROJECT;
+                await storage.saveProject(projectToLoad);
+                setProjects([projectToLoad]);
             }
 
-            if (!isFile) {
-                // Ensure children array exists for directories
-                if (!currentLevel[part].children) {
-                    currentLevel[part].children = [];
-                }
-                // This is safe because we just created it if it didn't exist
-                currentLevel = currentLevel[part].children as unknown as { [key: string]: FSTreeNode };
+            if (projectToLoad) {
+                setProject(projectToLoad);
+                localStorage.setItem('last_project_id', projectToLoad.id);
+                const htmlFile = Object.values(projectToLoad.nodes).find((n: Node) => n.type === 'file' && n.name.endsWith('.html'));
+                setActiveFileId(htmlFile?.id ?? null);
+            } else {
+                setIsProjectSelectorOpen(true);
             }
+        };
+        init().catch(console.error);
+    }, []);
+
+    // Console message listener
+    useEffect(() => {
+        const handleMessage = (event: MessageEvent) => {
+            if (event.data?.source === 'preview-console') {
+                const { type, data } = event.data;
+                setLogs(prev => [...prev, { id: id(), type, timestamp: new Date().toLocaleTimeString(), data }]);
+            }
+        };
+        window.addEventListener('message', handleMessage);
+        return () => window.removeEventListener('message', handleMessage);
+    }, []);
+
+    // Autosave
+    useEffect(() => {
+        if (debouncedProject && saveStatus === 'unsaved' && settings.autosaveInterval > 0) {
+            handleSaveProject();
+        }
+    }, [debouncedProject, settings.autosaveInterval, saveStatus]);
+
+    // Save settings
+    useEffect(() => {
+        storage.saveSettings(settings);
+        document.documentElement.setAttribute('data-theme', settings.theme);
+        document.documentElement.style.setProperty('--font-size', `${settings.fontSize}px`);
+    }, [settings]);
+
+    const handleSaveProject = useCallback(async () => {
+        if (!project || saveStatus !== 'unsaved') return;
+        setSaveStatus('saving');
+        await storage.saveProject(project);
+        setTimeout(() => setSaveStatus('saved'), 500);
+    }, [project, saveStatus]);
+
+    const handleFileChange = useCallback((id: string, content: string) => {
+        setProject(p => {
+            if (!p) return p;
+            const node = p.nodes[id];
+            if (node?.type !== 'file' || node.content === content) return p;
+            
+            const newNodes = { ...p.nodes, [id]: { ...node, content, updatedAt: now() } };
+            return { ...p, nodes: newNodes, updatedAt: now() };
         });
-    });
+        setSaveStatus('unsaved');
+    }, []);
+
+    const handleLoadProject = useCallback(async (projectId: string) => {
+        const projectToLoad = await storage.loadProjectById(projectId);
+        if (projectToLoad) {
+            setProject(projectToLoad);
+            localStorage.setItem('last_project_id', projectId);
+            const htmlFile = Object.values(projectToLoad.nodes).find((n: Node) => n.type === 'file' && n.name.endsWith('.html'));
+            setActiveFileId(htmlFile?.id ?? null);
+            setIsProjectSelectorOpen(false);
+            setSaveStatus('saved');
+        }
+    }, []);
+
+    const handleNewProject = useCallback(async () => {
+        const name = prompt("Enter project name:", `project-${id()}`);
+        if (!name) return;
+        const newId = id('proj');
+        const newProject: Project = { ...SAMPLE_PROJECT, id: newId, name, createdAt: now(), updatedAt: now(), nodes: JSON.parse(JSON.stringify(SAMPLE_PROJECT.nodes))};
+        newProject.nodes['root'] = {...newProject.nodes['root'], name:name};
+
+        await storage.saveProject(newProject);
+        const allProjects = await storage.getAllProjects();
+        setProjects(allProjects);
+        await handleLoadProject(newProject.id);
+    }, [handleLoadProject]);
+
+    const handleDeleteProject = useCallback(async (projectId: string) => {
+        if (!window.confirm("Delete project permanently?")) return;
+        await storage.deleteProject(projectId);
+        const allProjects = await storage.getAllProjects();
+        setProjects(allProjects);
+        if (project?.id === projectId) {
+            if (allProjects.length > 0) await handleLoadProject(allProjects[0].id);
+            else setProject(null);
+        }
+    }, [project, handleLoadProject]);
+
+    const handleNewFile = (parentId: string) => {
+        const name = prompt("Enter file name:", "new-file.js");
+        if (!name) return;
     
-    // Sort helper
-    const sortNodes = (nodes: FSTreeNode[]) => {
-      nodes.sort((a, b) => {
-        // Folders first
-        if (a.children && !b.children) return -1;
-        if (!a.children && b.children) return 1;
-        // Then by name
-        return a.name.localeCompare(b.name);
-      });
-      // Recursively sort children
-      nodes.forEach(node => {
-        if (node.children) {
-          sortNodes(node.children);
-        }
-      });
+        setProject(p => {
+            if (!p) return p;
+    
+            const parent = p.nodes[parentId];
+            if (!parent || parent.type !== 'folder') {
+                alert("Error: Cannot create file because the parent is not a folder.");
+                return p;
+            }
+    
+            const childrenIds = parent.childrenIds || [];
+            if (childrenIds.some(id => p.nodes[id]?.name === name)) {
+                alert(`Error: A file or folder named "${name}" already exists.`);
+                return p;
+            }
+    
+            const fileId = id('file');
+            const file: FileNode = { id: fileId, name, type: 'file', parentId, content: '', createdAt: now(), updatedAt: now() };
+            const newParent: FolderNode = { ...parent, childrenIds: [...childrenIds, fileId], updatedAt: now() };
+            const newNodes = { ...p.nodes, [fileId]: file, [parentId]: newParent };
+            
+            setActiveFileId(fileId);
+            setSaveStatus('unsaved');
+            
+            return { ...p, nodes: newNodes, updatedAt: now() };
+        });
     };
     
-    const tree = Object.values(root);
-    sortNodes(tree);
-    return tree;
-}
-
-const getFileExtension = (path: string) => path.split('.').pop()?.toLowerCase() ?? '';
-
-// --- UI COMPONENTS ---
-
-interface IconButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
-  icon: React.ReactNode;
-  label: string;
-}
-
-const IconButton: React.FC<IconButtonProps> = ({ icon, label, ...props }) => (
-  <button aria-label={label} title={label} className="flex items-center gap-2 px-3 py-2 text-sm font-medium rounded-md text-[color:var(--muted)] bg-[color:var(--surface)] hover:bg-[color:var(--accent)] hover:text-[#0d1117] transition-colors duration-200" {...props}>
-    {icon}
-    <span className="hidden sm:inline">{label}</span>
-  </button>
-);
-
-const Topbar: React.FC<{ onNew: () => void; onSave: () => void; onExport: () => void; onImport: (e: React.ChangeEvent<HTMLInputElement>) => void; onSettings: () => void; onMenuClick: () => void; }> = ({ onNew, onSave, onExport, onImport, onSettings, onMenuClick }) => {
-    const importInputRef = useRef<HTMLInputElement>(null);
-    return (
-        <header className="bg-[color:var(--panel)] flex items-center justify-between p-2 border-b border-[color:var(--surface)] shadow-md flex-shrink-0">
-            <div className="flex items-center gap-2">
-                <button onClick={onMenuClick} className="p-2 -ml-2 text-[color:var(--muted)] hover:text-[color:var(--text)]" aria-label="Toggle File Explorer">
-                    <MenuIcon className="h-6 w-6" />
-                </button>
-                <div className="flex items-center gap-4">
-                    <h1 className="text-xl font-bold text-[color:var(--text)]">SAT18 Web IDE</h1>
-                    <span className="hidden lg:inline text-xs text-[color:var(--muted)]">Monorepo-ready • All data stays local</span>
-                </div>
-            </div>
-            <div className="flex items-center gap-2">
-                <IconButton icon={<FileIcon className="h-4 w-4" />} label="New Project" onClick={onNew} />
-                <IconButton icon={<SaveIcon className="h-4 w-4" />} label="Save" onClick={onSave} />
-                <IconButton icon={<ExportIcon className="h-4 w-4" />} label="Export" onClick={onExport} />
-                <input type="file" ref={importInputRef} onChange={onImport} accept=".json" className="hidden" />
-                <IconButton icon={<ImportIcon className="h-4 w-4" />} label="Import" onClick={() => importInputRef.current?.click()} />
-                <IconButton icon={<SettingsIcon className="h-4 w-4" />} label="Settings" onClick={onSettings} />
-            </div>
-        </header>
-    );
-};
-
-const FileSystemEntry: React.FC<{
-  node: FSTreeNode;
-  level: number;
-  activeFileId: string | null;
-  expandedFolders: Set<string>;
-  onFileSelect: (id: string) => void;
-  onDeleteFile: (id: string) => void;
-  onToggleFolder: (path: string) => void;
-}> = ({ node, level, activeFileId, expandedFolders, onFileSelect, onDeleteFile, onToggleFolder }) => {
-  const isFolder = !!node.children;
-  const isExpanded = expandedFolders.has(node.path);
-
-  if (isFolder) {
-    return (
-      <div>
-        <div
-          onClick={() => onToggleFolder(node.path)}
-          className="flex items-center group p-1.5 text-sm rounded cursor-pointer transition-colors text-[color:var(--muted)] hover:bg-[color:var(--surface)] hover:text-[color:var(--text)]"
-          style={{ paddingLeft: `${level * 1 + 0.5}rem` }}
-        >
-          {isExpanded ? <FolderOpenIcon className="h-4 w-4 mr-2 flex-shrink-0" /> : <FolderIcon className="h-4 w-4 mr-2 flex-shrink-0" />}
-          <span className="truncate flex-1 font-semibold">{node.name}</span>
-        </div>
-        {isExpanded && node.children && (
-          <div>
-            {node.children.map(child => (
-              <FileSystemEntry key={child.path} node={child} level={level + 1} {...{ activeFileId, expandedFolders, onFileSelect, onDeleteFile, onToggleFolder }} />
-            ))}
-          </div>
-        )}
-      </div>
-    );
-  }
-  
-  // It's a file
-  return (
-    <div
-      onClick={() => onFileSelect(node.file!.id)}
-      className={`flex items-center justify-between group p-1.5 text-sm rounded cursor-pointer transition-colors ${
-        activeFileId === node.file!.id ? 'bg-[color:var(--accent)] text-[#0d1117] font-bold' : 'text-[color:var(--muted)] hover:bg-[color:var(--surface)] hover:text-[color:var(--text)]'
-      }`}
-      style={{ paddingLeft: `${level * 1 + 0.5}rem` }}
-    >
-      <div className="flex items-center truncate flex-1">
-        <FileIcon className="h-4 w-4 mr-2 flex-shrink-0" />
-        <span className="truncate">{node.name}</span>
-      </div>
-      <button
-        onClick={(e) => { e.stopPropagation(); onDeleteFile(node.file!.id); }}
-        title={`Delete ${node.name}`}
-        className="p-1 rounded opacity-0 group-hover:opacity-100 focus:opacity-100 hover:bg-red-500/20 text-red-400 flex-shrink-0"
-      >
-        <TrashIcon className="h-4 w-4" />
-      </button>
-    </div>
-  );
-};
-
-const FileExplorer: React.FC<{
-  files: ProjectFile[];
-  activeFileId: string | null;
-  onFileSelect: (id: string) => void;
-  onNewFile: () => void;
-  onDeleteFile: (id: string) => void;
-}> = ({ files, activeFileId, onFileSelect, onNewFile, onDeleteFile }) => {
-  const fileTree = useMemo(() => buildFileTree(files), [files]);
-  const [expandedFolders, setExpandedFolders] = useState(() => {
-    // Automatically expand parent folders of the active file on initial load
-    const activeFile = files.find(f => f.id === activeFileId);
-    const expanded = new Set<string>();
-    if (activeFile) {
-        const parts = activeFile.path.split('/');
-        parts.pop(); // remove filename
-        let currentPath = '';
-        for (const part of parts) {
-            currentPath = currentPath ? `${currentPath}/${part}` : part;
-            expanded.add(currentPath);
-        }
-    }
-    return expanded;
-  });
-
-  const handleToggleFolder = (path: string) => {
-    setExpandedFolders(prev => {
-      const next = new Set(prev);
-      if (next.has(path)) {
-        next.delete(path);
-      } else {
-        next.add(path);
-      }
-      return next;
-    });
-  };
-
-  return (
-    <div className="flex flex-col bg-[color:var(--editor-gutter)] w-60 p-2 border-r border-[color:var(--surface)] h-full">
-      <div className="flex justify-between items-center mb-2 p-1">
-        <h3 className="text-sm font-bold uppercase tracking-wider text-[color:var(--muted)]">Project Files</h3>
-        <button onClick={onNewFile} title="New File" className="p-1 rounded hover:bg-[color:var(--surface)]">
-          <PlusIcon className="h-4 w-4 text-[color:var(--muted)]" />
-        </button>
-      </div>
-      <div className="flex-grow overflow-y-auto">
-        {fileTree.map(node => (
-          <FileSystemEntry
-            key={node.path}
-            node={node}
-            level={0}
-            activeFileId={activeFileId}
-            expandedFolders={expandedFolders}
-            onFileSelect={onFileSelect}
-            onDeleteFile={onDeleteFile}
-            onToggleFolder={handleToggleFolder}
-          />
-        ))}
-      </div>
-    </div>
-  );
-};
-
-
-const EditorPanel: React.FC<{ files: ProjectFile[]; activeFileId: string | null; onFileChange: (id: string, content: string) => void; onFileSelect: (id: string) => void; settings: Settings; }> = ({ files, activeFileId, onFileChange, onFileSelect, settings }) => {
-  const activeFile = files.find(f => f.id === activeFileId);
-  if (!activeFile) {
-    return (
-        <div className="flex flex-col bg-[color:var(--panel)] h-full items-center justify-center text-[color:var(--muted)]">
-            <p>No file selected.</p>
-            <p className="text-sm">Select a file from the explorer to begin editing.</p>
-        </div>
-    );
-  }
-  return (
-    <div className="flex flex-col bg-[color:var(--panel)] h-full">
-      <div className="flex border-b border-[color:var(--surface)] bg-[color:var(--editor-gutter)] overflow-x-auto">
-        {files.map(file => (
-          <button key={file.id} onClick={() => onFileSelect(file.id)} className={`px-4 py-2 text-sm border-r border-[color:var(--surface)] transition-colors whitespace-nowrap ${activeFileId === file.id ? 'bg-[color:var(--panel)] text-[color:var(--text)]' : 'text-[color:var(--muted)] hover:bg-[color:var(--surface)]'}`}>
-            {file.path.split('/').pop()}
-          </button>
-        ))}
-      </div>
-      <textarea value={activeFile.content} onChange={(e) => onFileChange(activeFile.id, e.target.value)} className="flex-grow w-full p-4 bg-[color:var(--editor-bg)] text-[color:var(--text)] font-mono focus:outline-none resize-none" style={{ fontSize: `${settings.fontSize}px`, whiteSpace: settings.lineWrap ? 'pre-wrap' : 'pre', overflowWrap: 'break-word', tabSize: settings.tabSize, MozTabSize: settings.tabSize }} spellCheck="false" />
-    </div>
-  );
-};
-
-const PreviewPanel: React.FC<{ srcDoc: string }> = ({ srcDoc }) => (
-    <iframe srcDoc={srcDoc} title="preview" sandbox="allow-scripts allow-same-origin" className="w-full h-full bg-white border-none" />
-);
-
-const Console: React.FC<{ logs: LogEntry[]; onClear: () => void; onReset: () => void; isOpen: boolean; onToggle: () => void; }> = ({ logs, onClear, onReset, isOpen, onToggle }) => {
-    const logColors: Record<LogType, string> = { log: 'text-[color:var(--text)]', warn: 'text-yellow-400', error: 'text-[color:var(--error)]', info: 'text-blue-400' };
-    return (
-        <div className="bg-[color:var(--panel)] border-t border-[color:var(--surface)]">
-            <div className="flex items-center justify-between p-2 cursor-pointer" onClick={onToggle}>
-                <h3 className="font-bold text-sm">Console ({logs.length})</h3>
-                <div className="flex items-center gap-2">
-                    <button onClick={(e) => { e.stopPropagation(); onReset(); }} title="Reset Preview" className="p-1 rounded hover:bg-[color:var(--surface)]"><RefreshCwIcon className="h-4 w-4 text-[color:var(--muted)]" /></button>
-                    <button onClick={(e) => { e.stopPropagation(); onClear(); }} title="Clear Console" className="p-1 rounded hover:bg-[color:var(--surface)]"><TrashIcon className="h-4 w-4 text-[color:var(--muted)]" /></button>
-                    <ChevronDownIcon className={`h-5 w-5 text-[color:var(--muted)] transition-transform ${isOpen ? 'rotate-180' : ''}`} />
-                </div>
-            </div>
-            {isOpen && (
-                 <div className="overflow-y-auto h-48 p-2 font-mono text-xs bg-[color:var(--editor-gutter)]">
-                 {logs.map(log => (
-                     <div key={log.id} className={`flex gap-2 items-start py-1 border-b border-[color:var(--surface)] ${logColors[log.type]}`}>
-                         <span className="text-[color:var(--muted)] flex-shrink-0">{log.timestamp}</span>
-                         <div className="flex-grow break-all">
-                             {log.data.map((d, i) => {
-                                let content;
-                                if (typeof d === 'object' && d !== null) {
-                                    content = d.stack ? <pre className="whitespace-pre-wrap font-sans">{d.stack}</pre> : <pre className="whitespace-pre-wrap font-sans">{JSON.stringify(d, null, 2)}</pre>;
-                                } else { content = String(d); }
-                                return <span key={i} className="mr-2">{content}</span>
-                             })}
-                         </div>
-                     </div>
-                 ))}
-                 {logs.length === 0 && <p className="text-[color:var(--muted)]">No logs — run your code to see output.</p>}
-             </div>
-            )}
-        </div>
-    );
-};
-
-const StatusBar: React.FC<{ activeFilePath: string; saveStatus: string; projectSize: string; }> = ({ activeFilePath, saveStatus, projectSize }) => (
-    <div className="bg-[color:var(--editor-gutter)] text-xs text-[color:var(--muted)] px-4 py-1 flex justify-between items-center border-t border-[color:var(--surface)]">
-        <div className="flex items-center gap-4">
-            <span>Path: {activeFilePath}</span>
-            <span>Size: {projectSize}</span>
-        </div>
-        <span>{saveStatus}</span>
-    </div>
-);
-
-const SettingsModal: React.FC<{ isOpen: boolean; onClose: () => void; settings: Settings; onSettingsChange: (s: Settings) => void; }> = ({ isOpen, onClose, settings, onSettingsChange }) => {
-    if (!isOpen) return null;
-    const handleChange = <K extends keyof Settings,>(field: K, value: Settings[K]) => onSettingsChange({ ...settings, [field]: value });
-    return (
-        <div className="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50">
-            <div className="bg-[color:var(--panel)] rounded-lg shadow-2xl p-6 w-full max-w-md border border-[color:var(--surface)]">
-                <div className="flex justify-between items-center mb-4">
-                    <h2 className="text-xl font-bold text-[color:var(--text)]">Settings</h2>
-                    <button onClick={onClose} className="p-1 rounded-full hover:bg-[color:var(--surface)]"><XIcon className="h-5 w-5 text-[color:var(--muted)]" /></button>
-                </div>
-                <div className="space-y-4 text-[color:var(--text)]">
-                    <div>
-                        <label className="block text-sm font-medium text-[color:var(--muted)] mb-1">Theme</label>
-                        <select value={settings.theme} onChange={(e) => handleChange('theme', e.target.value as 'dark' | 'light')} className="w-full bg-[color:var(--surface)] border border-[color:var(--surface)] rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-[color:var(--accent)]"><option value="dark">Dark</option><option value="light">Light</option></select>
-                    </div>
-                    <div>
-                        <label className="block text-sm font-medium text-[color:var(--muted)] mb-1">Font Size: {settings.fontSize}px</label>
-                        <input type="range" min="10" max="24" value={settings.fontSize} onChange={(e) => handleChange('fontSize', parseInt(e.target.value, 10))} className="w-full h-2 bg-[color:var(--surface)] rounded-lg appearance-none cursor-pointer accent-[color:var(--accent)]" />
-                    </div>
-                     <div>
-                        <label className="block text-sm font-medium text-[color:var(--muted)] mb-1">Tab Size</label>
-                        <input type="number" min="1" max="8" value={settings.tabSize} onChange={(e) => handleChange('tabSize', parseInt(e.target.value, 10))} className="w-full bg-[color:var(--surface)] border border-[color:var(--surface)] rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-[color:var(--accent)]" />
-                    </div>
-                    <div>
-                        <label className="block text-sm font-medium text-[color:var(--muted)] mb-1">Autosave Interval</label>
-                        <select value={settings.autosaveInterval} onChange={(e) => handleChange('autosaveInterval', parseInt(e.target.value, 10))} className="w-full bg-[color:var(--surface)] border border-[color:var(--surface)] rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-[color:var(--accent)]"><option value="0">Off</option><option value="5">5 seconds</option><option value="10">10 seconds</option><option value="30">30 seconds</option></select>
-                    </div>
-                    <div className="flex items-center justify-between"><label className="text-sm font-medium text-[color:var(--muted)]">Line Wrap</label><label className="relative inline-flex items-center cursor-pointer"><input type="checkbox" checked={settings.lineWrap} onChange={(e) => handleChange('lineWrap', e.target.checked)} className="sr-only peer" /><div className="w-11 h-6 bg-[color:var(--surface)] rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-[color:var(--accent)]"></div></label></div>
-                    <div className="flex items-center justify-between"><label className="text-sm font-medium text-[color:var(--muted)]">Allow External Resources</label><label className="relative inline-flex items-center cursor-pointer"><input type="checkbox" checked={settings.allowExternal} onChange={(e) => handleChange('allowExternal', e.target.checked)} className="sr-only peer" /><div className="w-11 h-6 bg-[color:var(--surface)] rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-[color:var(--accent)]"></div></label></div>
-                </div>
-            </div>
-        </div>
-    );
-};
-
-const Toast: React.FC<{ message: string; onClose: () => void; type: 'error' | 'info' }> = ({ message, onClose, type }) => {
-  useEffect(() => {
-    const timer = setTimeout(onClose, 5000);
-    return () => clearTimeout(timer);
-  }, [onClose]);
-
-  const colors = type === 'error' ? 'bg-[color:var(--error)] text-white' : 'bg-[color:var(--success)] text-white';
-  
-  return (
-    <div className={`fixed bottom-12 right-4 p-4 rounded-lg shadow-lg z-50 ${colors} flex items-center gap-4 animate-fade-in-up`}>
-      <span>{message}</span>
-      <button onClick={onClose} className="p-1 rounded-full hover:bg-black/20"><XIcon className="h-4 w-4" /></button>
-    </div>
-  );
-};
-
-// --- MAIN APP COMPONENT ---
-
-export default function App() {
-  const [files, setFiles] = useState<ProjectFile[]>(DEFAULT_FILES);
-  const [activeFileId, setActiveFileId] = useState<string | null>(DEFAULT_FILES[0].id);
-  const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
-  const [logs, setLogs] = useState<LogEntry[]>([]);
-  const [isConsoleOpen, setConsoleOpen] = useState(true);
-  const [isSettingsModalOpen, setSettingsModalOpen] = useState(false);
-  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
-  const [saveStatus, setSaveStatus] = useState('Ready');
-  const [mobileView, setMobileView] = useState<'editor' | 'preview'>('editor');
-  const [previewKey, setPreviewKey] = useState(0);
-  const [toast, setToast] = useState<{ id: number; message: string; type: 'error' | 'info' } | null>(null);
-  const [isResizing, setIsResizing] = useState(false);
-  const [isFileExplorerOpen, setFileExplorerOpen] = useState(true);
-
-  const mainContainerRef = useRef<HTMLDivElement>(null);
-  const debouncedFiles = useDebounce(files, 500);
-  const activeFile = useMemo(() => files.find(f => f.id === activeFileId) ?? null, [files, activeFileId]);
-
-  const projectSize = useMemo(() => {
-    const totalBytes = files.reduce((acc, file) => acc + new Blob([file.content]).size, 0);
-    if (totalBytes < 1024) return `${totalBytes} B`;
-    if (totalBytes < 1024 * 1024) return `${(totalBytes / 1024).toFixed(2)} KB`;
-    return `${(totalBytes / (1024 * 1024)).toFixed(2)} MB`;
-  }, [files]);
-  
-  const startResize = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    setIsResizing(true);
-    const handleMouseMove = (moveEvent: MouseEvent) => {
-        if (!mainContainerRef.current) return;
-        const { left, width } = mainContainerRef.current.getBoundingClientRect();
-        const newEditorWidth = ((moveEvent.clientX - left) / width) * 100;
-        if (newEditorWidth > 15 && newEditorWidth < 85) {
-            mainContainerRef.current.style.setProperty('--editor-width', `${newEditorWidth}%`);
-        }
+    const handleNewFolder = (parentId: string) => {
+        const name = prompt("Enter folder name:", "new-folder");
+        if (!name) return;
+    
+        setProject(p => {
+            if (!p) return p;
+    
+            const parent = p.nodes[parentId];
+            if (!parent || parent.type !== 'folder') {
+                alert("Error: Cannot create folder because the parent is not a folder.");
+                return p;
+            }
+    
+            const childrenIds = parent.childrenIds || [];
+            if (childrenIds.some(id => p.nodes[id]?.name === name)) {
+                alert(`Error: A file or folder named "${name}" already exists.`);
+                return p;
+            }
+    
+            const folderId = id('folder');
+            const folder: FolderNode = { id: folderId, name, type: 'folder', parentId, childrenIds: [], createdAt: now(), updatedAt: now() };
+            const newParent: FolderNode = { ...parent, childrenIds: [...childrenIds, folderId], updatedAt: now() };
+            const newNodes = { ...p.nodes, [folderId]: folder, [parentId]: newParent };
+            
+            setSaveStatus('unsaved');
+            
+            return { ...p, nodes: newNodes, updatedAt: now() };
+        });
     };
-    const handleMouseUp = () => {
-        setIsResizing(false);
-        window.removeEventListener('mousemove', handleMouseMove);
-        window.removeEventListener('mouseup', handleMouseUp);
-    };
-    window.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('mouseup', handleMouseUp);
-  }, []);
 
-  useEffect(() => {
-    (async () => {
-      const loadedFiles = await db.loadFiles();
-      if (loadedFiles?.length > 0) { setFiles(loadedFiles); setActiveFileId(loadedFiles[0].id); }
-      const loadedSettings = await db.loadSettings();
-      if (loadedSettings) setSettings(loadedSettings);
-      setSaveStatus('Loaded');
-    })();
-  }, []);
+    const handleDeleteNode = (nodeId: string) => {
+        if (!window.confirm("Delete this item and all its contents permanently?")) return;
+        
+        let shouldClearActiveFile = false;
+        if (activeFileId) {
+            const deletedIds = new Set<string>();
+            const queue: string[] = [nodeId];
+            const nodes = project!.nodes;
 
-  useEffect(() => { document.documentElement.setAttribute('data-theme', settings.theme); }, [settings.theme]);
-  useEffect(() => { db.saveSettings(settings); }, [settings]);
-  
-  const handleSaveProject = useCallback(async () => {
-    setSaveStatus('Saving...');
-    await db.saveFiles(files);
-    setHasUnsavedChanges(false);
-    setSaveStatus(`Saved at ${new Date().toLocaleTimeString()}`);
-  }, [files]);
-
-  useEffect(() => {
-    if (!hasUnsavedChanges || settings.autosaveInterval === 0) return;
-    setSaveStatus('Saving...');
-    const timer = setTimeout(handleSaveProject, settings.autosaveInterval * 1000);
-    return () => clearTimeout(timer);
-  }, [files, settings.autosaveInterval, hasUnsavedChanges, handleSaveProject]);
-
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => { if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); handleSaveProject(); }};
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleSaveProject]);
-
-  const handleFileChange = useCallback((id: string, content: string) => {
-    setFiles(currentFiles => currentFiles.map(file => (file.id === id ? { ...file, content } : file)));
-    if (!hasUnsavedChanges) setHasUnsavedChanges(true);
-    setSaveStatus('Unsaved changes');
-  }, [hasUnsavedChanges]);
-
-  const generatePreviewContent = useCallback((projectFiles: ProjectFile[], currentSettings: Settings): string => {
-    const htmlFile = projectFiles.find(f => f.path.endsWith('.html'));
-    const cssFiles = projectFiles.filter(f => f.path.endsWith('.css'));
-    const jsFile = projectFiles.find(f => f.path.endsWith('.js') || f.path.endsWith('.mjs'));
-    const csp = currentSettings.allowExternal ? `` : `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; font-src 'none';">`;
-    const consoleForwarder = `(function(){const s=(t,d)=>{try{const e=d.map(i=>{if(i instanceof Error)return{message:i.message,stack:i.stack,name:i.name};try{return JSON.parse(JSON.stringify(i))}catch(r){return String(i)}});window.parent.postMessage({type:t,data:e},"*")}catch(i){window.parent.postMessage({type:t,data:["Error serializing log data"]},"*")}};["log","error","warn","info"].forEach(t=>{const d=console[t];console[t]=function(...e){s(t,e);d.apply(console,e)}});window.addEventListener("error",t=>s("error",[t.message,t.filename,t.lineno,t.colno,t.error]));window.addEventListener("unhandledrejection",t=>s("error",[t.reason]))})();`;
-    const styles = cssFiles.map(f => `<style>${f.content}</style>`).join('\n');
-    return `<!DOCTYPE html><html><head>${csp}${styles}</head><body>${htmlFile?.content||''}<script>${consoleForwarder}<\/script><script>try{${jsFile?.content||''}}catch(e){console.error(e)}<\/script></body></html>`;
-  }, []);
-
-  const srcDoc = useMemo(() => generatePreviewContent(debouncedFiles, settings), [debouncedFiles, settings, generatePreviewContent]);
-
-  useEffect(() => {
-    const handleMessage = (event: MessageEvent) => {
-      const { type, data } = event.data;
-      if (['log', 'warn', 'error', 'info'].includes(type)) {
-        setLogs(prev => [...prev, { id: crypto.randomUUID(), type: type as LogType, timestamp: new Date().toLocaleTimeString(), data }]);
-        if (type === 'error') {
-          setToast({ id: Date.now(), message: 'Error in preview. See console.', type: 'error' });
+            while (queue.length > 0) {
+                const currentId = queue.shift()!;
+                deletedIds.add(currentId);
+                const node = nodes[currentId];
+                if (node?.type === 'folder') {
+                    queue.push(...(node.childrenIds || []));
+                }
+            }
+            if (deletedIds.has(activeFileId)) {
+                shouldClearActiveFile = true;
+            }
         }
-      }
+
+        setProject(p => {
+            if (!p || nodeId === p.rootId) return p;
+    
+            const newNodes = { ...p.nodes };
+            const queue: string[] = [nodeId];
+            const parentId = p.nodes[nodeId]?.parentId;
+    
+            while (queue.length > 0) {
+                const currentId = queue.shift()!;
+                const node = newNodes[currentId];
+                if (node?.type === 'folder') {
+                    queue.push(...(node.childrenIds || []));
+                }
+                delete newNodes[currentId];
+            }
+    
+            if (parentId && newNodes[parentId]?.type === 'folder') {
+                const parent = newNodes[parentId] as FolderNode;
+                const childrenIds = parent.childrenIds || [];
+                newNodes[parentId] = { ...parent, childrenIds: childrenIds.filter(id => id !== nodeId), updatedAt: now() };
+            }
+            
+            return { ...p, nodes: newNodes, updatedAt: now() };
+        });
+
+        if (shouldClearActiveFile) setActiveFileId(null);
+        setSaveStatus('unsaved');
     };
-    window.addEventListener('message', handleMessage);
-    return () => window.removeEventListener('message', handleMessage);
-  }, []);
 
-  const handleNewProject = () => {
-    if (hasUnsavedChanges && !window.confirm('You have unsaved changes. Are you sure?')) return;
-    setFiles(DEFAULT_FILES);
-    setActiveFileId(DEFAULT_FILES[0].id);
-    setLogs([]);
-    setHasUnsavedChanges(false);
-    setSaveStatus('New project');
-  };
+    const handleExport = () => {
+        if (!project) return;
+        const dataStr = JSON.stringify(project, null, 2);
+        const blob = new Blob([dataStr], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.download = `${project.name}.json`;
+        link.href = url;
+        link.click();
+        URL.revokeObjectURL(url);
+    };
 
-  const handleNewFile = () => {
-    const path = prompt("Enter new file path (e.g., src/components/Button.js):");
-    if (!path) return;
-    if (files.some(f => f.path === path)) {
-        alert("A file with this path already exists.");
-        return;
+    const handleImport = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = async (event) => {
+            try {
+                const newProject = JSON.parse(event.target?.result as string) as Project;
+                if (!newProject.id || !newProject.name || !newProject.nodes) throw new Error("Invalid project structure");
+                await storage.saveProject(newProject);
+                const allProjects = await storage.getAllProjects();
+                setProjects(allProjects);
+                await handleLoadProject(newProject.id);
+            } catch (err) {
+                console.error("Import failed:", err);
+                alert("Error importing project: invalid file format.");
+            }
+        };
+        reader.readAsText(file);
+        e.target.value = ''; // Reset file input
+    };
+
+    const getPath = () => activeFileId && project ? findNodePath(project, activeFileId) : '/';
+    const projectSize = useMemo(() => project ? getProjectSize(project) : '0 B', [project]);
+    
+    const srcDoc = useMemo(() => {
+        if (!project) return '';
+        const htmlNode = Object.values(project.nodes).find((n: Node) => n.type === 'file' && n.name === 'index.html' && n.parentId === project.rootId) as FileNode;
+        if (!htmlNode) return '<h1>index.html not found in project root</h1>';
+
+        const injectedScript = `
+        <script>
+            // Console override
+            const _o = {}; 
+            ['log', 'warn', 'error', 'info'].forEach(k => {
+                _o[k] = console[k];
+                console[k] = (...args) => {
+                    _o[k](...args);
+                    try {
+                        window.parent.postMessage({ source: 'preview-console', type: k, data: JSON.parse(JSON.stringify(args)) }, '*');
+                    } catch(e) {
+                         window.parent.postMessage({ source: 'preview-console', type: k, data: ['[non-serializable object]'] }, '*');
+                    }
+                }
+            });
+            // Global error handler
+            window.addEventListener('error', e => console.error(e.message, 'at', e.filename + ':' + e.lineno));
+        </script>
+        `;
+
+        const htmlContent = htmlNode.content || '';
+        let html = htmlContent.replace('</head>', `${injectedScript}</head>`);
+        
+        // Find and replace local asset paths
+        html = html.replace(/(href|src)=["'](?!https?:\/\/)([^"']+)["']/g, (_, attr, rawPath) => {
+            const path = rawPath.startsWith('./') ? rawPath.substring(2) : rawPath;
+            
+            const fileNode = Object.values(project.nodes).find((n: Node) => {
+                if (n.type !== 'file') return false;
+                const relativePath = getNodeRelativePath(project, n.id);
+                return relativePath === path;
+            }) as FileNode | undefined;
+
+            if (fileNode) {
+                const mimeType = fileNode.name.endsWith('.js') ? 'application/javascript'
+                               : fileNode.name.endsWith('.css') ? 'text/css'
+                               : 'text/plain';
+                
+                const content = fileNode.content || '';
+                const blob = new Blob([content], { type: mimeType });
+                const url = URL.createObjectURL(blob);
+                return `${attr}="${url}"`;
+            }
+            return `${attr}="${rawPath}"`;
+        });
+        
+        return html;
+    }, [project, previewKey]);
+
+
+    if (!project) {
+        return (
+            <>
+                <div className="flex h-screen items-center justify-center bg-[#0d1117] text-[#e6edf3]">Loading IDE...</div>
+                <ProjectSelectorModal isOpen={isProjectSelectorOpen} projects={projects} onLoad={handleLoadProject} onNew={handleNewProject} onDelete={handleDeleteProject} />
+            </>
+        );
     }
 
-    const newFile: ProjectFile = { id: crypto.randomUUID(), path, content: `// New file: ${path}` };
-    setFiles(current => [...current, newFile]);
-    setActiveFileId(newFile.id);
-    setHasUnsavedChanges(true);
-  };
-
-  const handleDeleteFile = (id: string) => {
-      const fileToDelete = files.find(f => f.id === id);
-      if (!fileToDelete) return;
-      if (files.length === 1) {
-        setToast({id: Date.now(), message: "Cannot delete the last file.", type: 'error'});
-        return;
-      }
-      if (!window.confirm(`Are you sure you want to delete ${fileToDelete.path}?`)) return;
-
-      setFiles(current => {
-          const newFiles = current.filter(f => f.id !== id);
-          if (activeFileId === id) {
-              setActiveFileId(newFiles[0]?.id ?? null);
-          }
-          return newFiles;
-      });
-      setHasUnsavedChanges(true);
-  };
-  
-  const handleImportProject = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    if (hasUnsavedChanges && !window.confirm('You have unsaved changes that will be lost. Continue?')) return;
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      try {
-        const { files: newFiles, settings: newSettings } = JSON.parse(e.target?.result as string);
-        if (Array.isArray(newFiles) && newFiles.every(f => 'id' in f && 'path' in f && 'content' in f) && newSettings) {
-          setFiles(newFiles);
-          setSettings(newSettings);
-          setActiveFileId(newFiles[0]?.id || null);
-          setLogs([]);
-          setHasUnsavedChanges(false);
-          setSaveStatus('Project imported');
-        } else { alert('Invalid project file format.'); }
-      } catch (error) { alert('Error reading project file.'); console.error(error); }
-    };
-    reader.readAsText(file);
-    event.target.value = '';
-  };
-
-  const handleExportProject = () => {
-    const blob = new Blob([JSON.stringify({ files, settings }, null, 2)], { type: 'application/json' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = 'web-ide-project.json';
-    a.click();
-    URL.revokeObjectURL(a.href);
-  };
-  
-  const handleResetPreview = () => setPreviewKey(k => k + 1);
-
-  return (
-    <div className="flex flex-col h-screen bg-[color:var(--bg)] text-[color:var(--text)]">
-      <Topbar onNew={handleNewProject} onSave={handleSaveProject} onExport={handleExportProject} onImport={handleImportProject} onSettings={() => setSettingsModalOpen(true)} onMenuClick={() => setFileExplorerOpen(prev => !prev)} />
-      
-      <div className="flex flex-1 overflow-hidden">
-        {isFileExplorerOpen && (
-          <FileExplorer
-            files={files}
-            activeFileId={activeFileId}
-            onFileSelect={setActiveFileId}
-            onNewFile={handleNewFile}
-            onDeleteFile={handleDeleteFile}
-          />
-        )}
-        <div className="flex-1 flex flex-col overflow-hidden">
-          <main 
-            ref={mainContainerRef} 
-            className="flex-grow grid grid-cols-1 md:grid md:grid-cols-[var(--editor-width)_4px_1fr] overflow-hidden"
-            style={{ '--editor-width': '50%' } as React.CSSProperties}
-          >
-            <div className={`flex flex-col h-full overflow-hidden ${mobileView !== 'editor' && 'hidden'} md:!flex`}>
-              <EditorPanel files={files} activeFileId={activeFileId} onFileChange={handleFileChange} onFileSelect={setActiveFileId} settings={settings} />
+    return (
+        <AppContext.Provider value={{ project }}>
+            <div className={`theme-${settings.theme} flex flex-col h-screen font-sans bg-[color:var(--panel)] text-[color:var(--text)] text-[var(--font-size)]`}>
+                <Topbar onSave={handleSaveProject} onExport={handleExport} onImport={handleImport} onSettings={() => setIsSettingsModalOpen(true)} onMenuClick={() => setIsExplorerVisible(!isExplorerVisible)} onSwitchProject={() => setIsProjectSelectorOpen(true)} onNew={() => {}}/>
+                <main className="flex flex-grow overflow-hidden">
+                    {isExplorerVisible && <FileExplorer activeFileId={activeFileId} onFileSelect={setActiveFileId} onNewFile={handleNewFile} onNewFolder={handleNewFolder} onDeleteNode={handleDeleteNode} />}
+                    <div className="flex-grow flex flex-col min-w-0">
+                        <div className="flex-grow flex overflow-hidden">
+                            <div className="w-1/2 flex flex-col"><EditorPanel activeFileId={activeFileId} onFileChange={handleFileChange} settings={settings} /></div>
+                            <div className="w-1/2 flex flex-col">
+                                <div className="flex-grow"><PreviewPanel key={previewKey} srcDoc={srcDoc} /></div>
+                                <Console logs={logs} onClear={() => setLogs([])} onReset={() => setPreviewKey(Date.now())} isOpen={isConsoleOpen} onToggle={() => setIsConsoleOpen(!isConsoleOpen)} />
+                            </div>
+                        </div>
+                        <StatusBar activeFile={activeFileId ? project.nodes[activeFileId] as FileNode : null} saveStatus={saveStatus} projectSize={projectSize} getPath={getPath} />
+                    </div>
+                </main>
+                <SettingsModal isOpen={isSettingsModalOpen} onClose={() => setIsSettingsModalOpen(false)} settings={settings} onSettingsChange={setSettings} />
+                <ProjectSelectorModal isOpen={isProjectSelectorOpen} projects={projects} onLoad={handleLoadProject} onNew={handleNewProject} onDelete={handleDeleteProject} />
             </div>
+        </AppContext.Provider>
+    );
+};
 
-            <div 
-                onMouseDown={startResize}
-                className={`hidden md:block w-1 cursor-col-resize bg-[color:var(--surface)] hover:bg-[color:var(--accent)] transition-colors duration-200 ${isResizing ? 'bg-[color:var(--accent)]' : ''}`}
-            />
-
-            <div className={`flex flex-col h-full overflow-hidden border-l border-[color:var(--surface)] md:border-l-0 ${mobileView !== 'preview' && 'hidden'} md:!flex`}>
-              <div className="flex-grow"><PreviewPanel key={previewKey} srcDoc={srcDoc} /></div>
-              <Console logs={logs} onClear={() => setLogs([])} onReset={handleResetPreview} isOpen={isConsoleOpen} onToggle={() => setConsoleOpen(!isConsoleOpen)} />
-            </div>
-          </main>
-
-          <div className="md:hidden flex bg-[color:var(--panel)] border-t border-[color:var(--surface)]">
-            <button onClick={() => setMobileView('editor')} className={`flex-1 p-3 font-bold text-center transition-colors ${mobileView === 'editor' ? 'bg-[color:var(--accent)] text-[#0d1117]' : 'text-[color:var(--muted)]'}`}>Editor</button>
-            <button onClick={() => setMobileView('preview')} className={`flex-1 p-3 font-bold text-center transition-colors ${mobileView === 'preview' ? 'bg-[color:var(--accent)] text-[#0d1117]' : 'text-[color:var(--muted)]'}`}>Preview</button>
-          </div>
-
-          <StatusBar activeFilePath={activeFile?.path ?? 'No File Selected'} saveStatus={saveStatus} projectSize={projectSize} />
-        </div>
-      </div>
-      <SettingsModal isOpen={isSettingsModalOpen} onClose={() => setSettingsModalOpen(false)} settings={settings} onSettingsChange={setSettings} />
-      {toast && <Toast key={toast.id} message={toast.message} type={toast.type} onClose={() => setToast(null)} />}
-    </div>
-  );
-}
+export default App;

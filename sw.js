@@ -7,7 +7,6 @@ const urlsToCache = [
   '/components/icons.tsx',
   '/constants.ts',
   '/hooks/useDebounce.ts',
-  '/services/db.ts',
   '/types.ts',
   '/metadata.json'
 ];
